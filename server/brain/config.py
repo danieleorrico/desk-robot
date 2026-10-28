@@ -105,7 +105,7 @@ TTS_CLARITY_DB = -1.5
 TTS_AUTO_PRESENCE_MAX = 6.0
 
 # Text-to-speech. The voice comes from Fish Audio (TTS_VOICE_ID above).
-TTS_FALLBACK_VOICE = "Fred"  # built-in voice used until Fish Audio is set up: a macOS `say`
+TTS_FALLBACK_VOICE = os.environ.get("TTS_FALLBACK_VOICE") or "Fred"  # built-in voice used until Fish Audio is set up: a macOS `say`
                              # voice name (`say -v ?` lists them); Windows and Linux use their default
 # Loudness. Fish's level wanders from line to line, so the audio goes through
 # an automatic gain control (mouth.Leveler) that holds it near TTS_LEVEL
@@ -143,13 +143,16 @@ if CHARACTER:
     TTS_MODEL = CHARACTER["tts_model"]
     TTS_ACTING = TTS_MODEL in _characters.ACTING_MODELS
     WAKE_PHRASES = CHARACTER["wake_words"]
-STT_MODEL = "base.en"    # faster-whisper model: base.en ~0.3 s per utterance on an Apple
+STT_MODEL = os.environ.get("STT_MODEL") or "base.en"    # faster-whisper model: base.en ~0.3 s per utterance on an Apple
                          # Silicon Mac, small.en hears a little better but takes ~1 s
 # The Hugging Face commit of that model to download (Systran/faster-whisper-<STT_MODEL>).
 # Pinned so a changed upload can't be loaded unnoticed; set to None to take the latest.
-STT_REVISION = "3d3d5dee26484f91867d81cb899cfcf72b96be6c"
+STT_REVISION = "3d3d5dee26484f91867d81cb899cfcf72b96be6c" if STT_MODEL == "base.en" else None
+STT_BEAM = int(os.environ.get("STT_BEAM") or 1)   # 1 = fastest; 5 = more accurate (a bit slower)
 STT_THREADS = 8          # CPU threads for transcription (0 = library default of 4)
-STT_PROMPT = f"Hey {ROBOT_NAME}. {ROBOT_NAME} is a robot."  # name hint for the model
+STT_LANGUAGE = os.environ.get("STT_LANGUAGE") or "en"   # "it" for Italian (also set STT_MODEL=small: base.en is English only)
+STT_PROMPT = (f"Ehi {ROBOT_NAME}. {ROBOT_NAME} è un robot da scrivania. Parla con {HUMAN_NAME} del fratellino Ottone." if STT_LANGUAGE == "it"
+              else f"Hey {ROBOT_NAME}. {ROBOT_NAME} is a robot.")  # name hint for the model
 MIC_SOURCE = "auto"      # "robot" = the robot's mic, "mac" = MIC_DEVICE below,
                          # "auto" = robot when it's connected, else this computer
                          # (the dashboard's "He listens through" sets both: settings rocky.mic / mic_device)
@@ -188,6 +191,12 @@ SLEEP_PHRASES = [        # any of these puts him to sleep until the next "hey <n
     "goodnight",
     "good night",
     "stop listening",
+    f"{_NAME} dormi",
+    f"{_NAME} vai a dormire",
+    "vai a dormire",
+    "buonanotte",
+    "buona notte",
+    "smetti di ascoltare",
 ]
 # What he says as he goes to sleep: personality.py, LINES.
 

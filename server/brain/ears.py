@@ -222,8 +222,8 @@ class Transcriber:
     def transcribe(self, audio: np.ndarray) -> str:
         segments, _ = self.model.transcribe(
             audio,
-            language="en",
-            beam_size=1,
+            language=config.STT_LANGUAGE,
+            beam_size=config.STT_BEAM,
             vad_filter=True,
             # Tells the model the name to expect; without this "Rocky" comes
             # out as "right" / "righty" about half the time.

@@ -25,7 +25,9 @@ server/models/siglip_*
 server/faces/custom/
 
 # Personalities made in the dashboard (export one to share it)
-server/characters/
+server/characters/*
+!server/characters/pasquale.json
+!server/characters/francesca.json
 
 # macOS and editors
 .DS_Store

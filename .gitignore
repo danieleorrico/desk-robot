@@ -52,3 +52,6 @@ docs/cad/
 
 # Custom PCBs (KiCad, Gerbers): sold with the print files, not in the repo
 pcb/
+
+# Certificati HTTPS della testa web
+server/certs/

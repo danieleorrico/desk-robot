@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#000000">
+<title>{name} · testa</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: #000; color: #cfd8dc; overflow: hidden;
+               font: 16px/1.4 -apple-system, system-ui, "Segoe UI", sans-serif; touch-action: manipulation; }
+  canvas#face { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #start { position: fixed; inset: 0; display: flex; flex-direction: column; gap: 18px; align-items: center;
+           justify-content: center; background: #000; z-index: 5; padding: 24px; text-align: center; }
+  #start h1 { margin: 0; font-size: 28px; font-weight: 600; }
+  #start p { margin: 0; max-width: 28em; color: #90a4ae; }
+  button { font: inherit; color: #e0f7fa; background: #12333a; border: 1px solid #1f5560; border-radius: 14px;
+           padding: 14px 26px; }
+  button:active { background: #1b4a54; }
+  #wake { font-size: 20px; padding: 18px 34px; }
+  #bar { position: fixed; left: 0; right: 0; bottom: max(10px, env(safe-area-inset-bottom)); display: flex;
+         justify-content: center; gap: 10px; z-index: 4; transition: opacity .4s; }
+  #bar.hide { opacity: 0; pointer-events: none; }
+  #bar button { padding: 10px 14px; font-size: 15px; background: rgba(18,51,58,.75); }
+  #bar button.off { opacity: .55; text-decoration: line-through; }
+  #status { position: fixed; top: max(8px, env(safe-area-inset-top)); left: 12px; font-size: 13px; color: #607d8b;
+            z-index: 4; display: flex; gap: 8px; align-items: center; }
+  #dot { width: 9px; height: 9px; border-radius: 50%; background: #b71c1c; }
+  #dot.ok { background: #2e7d32; }
+  #err { color: #ef9a9a; min-height: 1.4em; max-width: 30em; }
+</style>
+</head>
+<body>
+<canvas id="face"></canvas>
+<div id="status"><span id="dot"></span><span id="stext">spento</span></div>
+<div id="bar" class="hide">
+  <button id="bmic" title="Microfono">🎤 Microfono</button>
+  <button id="bcam" title="Fotocamera" class="off">📷 Fotocamera</button>
+  <button id="bfs" title="Schermo intero">⛶</button>
+</div>
+<div id="start">
+  <h1>{name}</h1>
+  <p>Questa pagina è la testa di {name}: gli occhi, il microfono e la voce. Tienila aperta e con lo schermo acceso, poi tocca il pulsante.</p>
+  <button id="wake">Sveglia {name}</button>
+  <div id="err"></div>
+</div>
+
+<script>
+"use strict";
+const NAME = "{name}";
+const $ = id => document.getElementById(id);
+const canvas = $("face"), g = canvas.getContext("2d");
+
+// ───────────────────────── stato ─────────────────────────
+let ws = null, wsOpen = false, wantRun = false, retry = 0, retryTimer = null;
+let ctx = null, gain = null, analyser = null, micStream = null, workletNode = null;
+let micWanted = true;      // il cervello vuole l'audio del microfono ("mic on/off")
+let micUserOn = true;      // il pulsante 🎤
+let camStream = null, camVideo = null, camTimer = null, camFps = 10, camSize = "vga", camUserOn = false;
+let asleep = false, emotion = "neutral", gazeX = 0, gazeY = 0, volume = 0.6;
+let speaking = false, mouthLevel = 0;
+let wakeLock = null;
+
+function setStatus(text, ok) { $("stext").textContent = text; $("dot").className = ok ? "ok" : ""; }
+function showErr(t) { $("err").textContent = t || ""; }
+
+// ───────────────────────── connessione ─────────────────────────
+function wsUrl() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  return proto + "//" + location.host + "/ws";
+}
+function connect() {
+  if (!wantRun) return;
+  clearTimeout(retryTimer);
+  setStatus("mi collego…", false);
+  try { ws = new WebSocket(wsUrl()); } catch (e) { scheduleRetry(); return; }
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => {
+    wsOpen = true; retry = 0;
+    ws.send(JSON.stringify({ type: "hello", who: "head", fw: "web-1" }));   // il ponte mette il token
+    setStatus("connessa", true);
+    sendState();
+  };
+  ws.onmessage = ev => onServer(ev.data);
+  ws.onclose = () => { wsOpen = false; stopCamTimer(); resetPlayback(); setStatus("scollegata", false); scheduleRetry(); };
+  ws.onerror = () => {};
+}
+function scheduleRetry() {
+  if (!wantRun) return;
+  retry = Math.min(retry + 1, 8);
+  retryTimer = setTimeout(connect, Math.min(1000 * retry, 8000));
+}
+function sendJson(o) { if (wsOpen) ws.send(JSON.stringify(o)); }
+function sendState() { sendJson({ type: "state", pan: Math.round(gazeX * 30), emotion }); }
+setInterval(sendState, 5000);
+
+// ───────────────────────── messaggi dal cervello ─────────────────────────
+function onServer(data) {
+  if (typeof data !== "string") {
+    const u8 = new Uint8Array(data);
+    if (u8.length > 1 && u8[0] === 1) playPcm(u8.subarray(1));
+    return;
+  }
+  let m; try { m = JSON.parse(data); } catch { return; }
+  switch (m.type) {
+    case "emotion": if (typeof m.name === "string") { emotion = m.name; } break;
+    case "pan": gazeX = clamp((+m.deg || 0) / 45, -1, 1); break;
+    case "tilt": gazeY = clamp(-(+m.deg || 0) / 35, -1, 1); break;
+    case "asleep": asleep = !!m.on; break;
+    case "volume": volume = clamp(+m.level, 0, 1); if (gain) gain.gain.value = volume; break;
+    case "mic": micWanted = !!m.on; break;
+    case "stream": camSize = m.size === "qvga" ? "qvga" : "vga"; camFps = clamp(+m.fps || 10, 1, 15);
+                   if (m.on) startCamTimer(); else stopCamTimer(); break;
+    case "snapshot": sendSnapshot(m.size); break;
+    case "speak_begin": beginReply(); break;
+    case "speak_end": endReply(); break;
+    case "mouth": if (typeof m.level === "number") mouthLevel = m.level < 0 ? 0 : Math.min(1, m.level * 6); break;
+    default: break;   // settings, face, glance: la testa non ne ha bisogno
+  }
+}
+const clamp = (v, a, b) => Math.max(a, Math.min(b, isFinite(v) ? v : 0));
+
+// ───────────────────────── voce (audio dal cervello) ─────────────────────────
+let playT = 0, replyOpen = false, replyDryMs = 0, replyStartedAt = 0, sources = new Set(), endTimer = null, lastTail = 0;
+function resetPlayback() {
+  for (const s of sources) { try { s.stop(); } catch {} }
+  sources.clear(); clearTimeout(endTimer); playT = 0; replyOpen = false; speaking = false;
+}
+function beginReply() { resetPlayback(); replyOpen = true; replyDryMs = 0; playT = 0; lastTail = 0; replyStartedAt = performance.now(); }
+function playPcm(bytes) {
+  if (!ctx || !replyOpen) return;
+  const n = bytes.length >> 1;
+  if (n < 1) return;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, n * 2);
+  const inRate = 16000, outRate = ctx.sampleRate, ratio = outRate / inRate;
+  const outLen = Math.max(1, Math.round(n * ratio));
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {                    // interpolazione lineare 16 kHz → frequenza del dispositivo
+    const pos = i / ratio, i0 = Math.floor(pos), f = pos - i0;
+    const a = i0 < n ? view.getInt16(i0 * 2, true) / 32768 : lastTail;
+    const b = i0 + 1 < n ? view.getInt16((i0 + 1) * 2, true) / 32768 : a;
+    out[i] = a + (b - a) * f;
+  }
+  lastTail = view.getInt16((n - 1) * 2, true) / 32768;
+  const buf = ctx.createBuffer(1, outLen, outRate);
+  buf.copyToChannel(out, 0);
+  const src = ctx.createBufferSource();
+  src.buffer = buf; src.connect(gain);
+  const now = ctx.currentTime;
+  if (playT === 0) { playT = now + 0.3; }                // un po' di anticipo prima di partire
+  else if (playT < now + 0.01) { replyDryMs += Math.round((now + 0.15 - playT) * 1000); playT = now + 0.15; }
+  src.start(playT);
+  playT += buf.duration;
+  speaking = true;
+  sources.add(src); src.onended = () => sources.delete(src);
+}
+function endReply() {
+  replyOpen = false;
+  const waitMs = ctx && playT ? Math.max(0, (playT - ctx.currentTime) * 1000) : 0;
+  clearTimeout(endTimer);
+  endTimer = setTimeout(() => {
+    speaking = false;
+    sendJson({ type: "speak_done", dry_ms: replyDryMs, wait_ms: 300, next_ms: 200, rssi: 0 });
+  }, waitMs + 120);
+}
+
+// ───────────────────────── microfono ─────────────────────────
+const WORKLET = `
+class Tap extends AudioWorkletProcessor {
+  process(inputs) { const c = inputs[0] && inputs[0][0]; if (c) this.port.postMessage(c.slice(0)); return true; }
+}
+registerProcessor("tap", Tap);`;
+
+// riduce da fs a 16 kHz (media pesata) e spedisce blocchi da 480 campioni (30 ms): 0x01 + PCM s16le
+const down = { ratio: 3, acc: 0, w: 0, phase: 0, out: new Int16Array(480), n: 0 };
+function feedMic(f32) {
+  for (let k = 0; k < f32.length; k++) {
+    const x = f32[k];
+    down.phase += 1;
+    if (down.phase < down.ratio) { down.acc += x; down.w += 1; continue; }
+    const over = down.phase - down.ratio, frac = 1 - over;
+    down.acc += x * frac; down.w += frac;
+    let v = down.acc / down.w; v = Math.max(-1, Math.min(1, v));
+    down.out[down.n++] = v < 0 ? v * 32768 : v * 32767;
+    down.acc = x * over; down.w = over; down.phase = over;
+    if (down.n === 480) {
+      if (wsOpen && micWanted && micUserOn && ws.bufferedAmount < 200000) {
+        const frame = new Uint8Array(1 + 960);
+        frame[0] = 1;
+        frame.set(new Uint8Array(down.out.buffer), 1);
+        ws.send(frame);
+      }
+      down.n = 0;
+    }
+  }
+}
+async function startMic() {
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+  });
+  const srcNode = ctx.createMediaStreamSource(micStream);
+  down.ratio = ctx.sampleRate / 16000;
+  if (ctx.audioWorklet) {
+    const url = URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" }));
+    await ctx.audioWorklet.addModule(url);
+    workletNode = new AudioWorkletNode(ctx, "tap");
+    workletNode.port.onmessage = e => feedMic(e.data);
+    srcNode.connect(workletNode);
+    const mute = ctx.createGain(); mute.gain.value = 0; workletNode.connect(mute); mute.connect(ctx.destination);
+  } else {                                              // browser vecchi
+    const sp = ctx.createScriptProcessor(2048, 1, 1);
+    sp.onaudioprocess = e => feedMic(e.inputBuffer.getChannelData(0));
+    srcNode.connect(sp); const mute = ctx.createGain(); mute.gain.value = 0; sp.connect(mute); mute.connect(ctx.destination);
+  }
+}
+
+// ───────────────────────── fotocamera (opzionale) ─────────────────────────
+async function enableCam() {
+  if (camStream) return true;
+  try {
+    camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+  } catch (e) { showErrBar("Fotocamera non disponibile"); return false; }
+  camVideo = document.createElement("video");
+  camVideo.playsInline = true; camVideo.muted = true; camVideo.srcObject = camStream;
+  await camVideo.play().catch(() => {});
+  return true;
+}
+function disableCam() {
+  stopCamTimer();
+  if (camStream) camStream.getTracks().forEach(t => t.stop());
+  camStream = null; camVideo = null;
+}
+function showErrBar(t) { setStatus(t, wsOpen); setTimeout(() => setStatus(wsOpen ? "connessa" : "scollegata", wsOpen), 2500); }
+function grab(w, h, q, cb) {
+  if (!camVideo || !camVideo.videoWidth) return cb(null);
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  c.getContext("2d").drawImage(camVideo, 0, 0, w, h);
+  c.toBlob(b => b ? b.arrayBuffer().then(cb) : cb(null), "image/jpeg", q);
+}
+function startCamTimer() {
+  stopCamTimer();
+  if (!camStream || !camUserOn) return;
+  const [w, h] = camSize === "qvga" ? [320, 240] : [640, 480];
+  camTimer = setInterval(() => {
+    if (!wsOpen || ws.bufferedAmount > 400000) return;
+    grab(w, h, 0.6, buf => { if (buf && wsOpen) { const f = new Uint8Array(1 + buf.byteLength); f[0] = 2; f.set(new Uint8Array(buf), 1); ws.send(f); } });
+  }, 1000 / camFps);
+}
+function stopCamTimer() { clearInterval(camTimer); camTimer = null; }
+function sendSnapshot(size) {
+  if (!camStream || !camUserOn) return;
+  const dims = { vga: [640, 480], svga: [800, 600], xga: [1024, 768], sxga: [1280, 960], uxga: [1600, 1200] }[size] || [1024, 768];
+  const vw = camVideo.videoWidth || dims[0], vh = camVideo.videoHeight || dims[1];
+  const s = Math.min(1, dims[0] / vw);
+  grab(Math.round(vw * s), Math.round(vh * s), 0.8, buf => {
+    if (buf && wsOpen) { const f = new Uint8Array(1 + buf.byteLength); f[0] = 3; f.set(new Uint8Array(buf), 1); ws.send(f); }
+  });
+}
+
+// ───────────────────────── avvio ─────────────────────────
+async function wakeUp() {
+  showErr("");
+  $("wake").disabled = true;
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    ctx = new AC({ latencyHint: "interactive" });
+    await ctx.resume();
+    gain = ctx.createGain(); gain.gain.value = volume;
+    analyser = ctx.createAnalyser(); analyser.fftSize = 512;
+    gain.connect(analyser); analyser.connect(ctx.destination);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error("Il microfono richiede una connessione sicura (HTTPS). Apri la pagina dall'indirizzo https:// indicato nelle istruzioni.");
+    }
+    await startMic();
+  } catch (e) {
+    $("wake").disabled = false;
+    showErr(String(e && e.message || e));
+    return;
+  }
+  $("start").style.display = "none";
+  $("bar").classList.remove("hide");
+  wantRun = true; connect();
+  keepAwake();
+  barTimer();
+}
+async function keepAwake() {
+  try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request("screen"); } catch {}
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && wantRun) { keepAwake(); if (ctx && ctx.state !== "running") ctx.resume(); }
+});
+let barHide = null;
+function barTimer() { $("bar").classList.remove("hide"); clearTimeout(barHide); barHide = setTimeout(() => $("bar").classList.add("hide"), 5000); }
+document.addEventListener("pointerdown", () => { if (wantRun) barTimer(); });
+
+$("wake").onclick = wakeUp;
+$("bmic").onclick = () => { micUserOn = !micUserOn; $("bmic").classList.toggle("off", !micUserOn); barTimer(); };
+$("bcam").onclick = async () => {
+  if (camUserOn) { camUserOn = false; disableCam(); $("bcam").classList.add("off"); }
+  else if (await enableCam()) { camUserOn = true; $("bcam").classList.remove("off"); startCamTimer(); }
+  barTimer();
+};
+$("bfs").onclick = () => {
+  const el = document.documentElement;
+  if (document.fullscreenElement) document.exitFullscreen();
+  else (el.requestFullscreen || el.webkitRequestFullscreen || (() => {})).call(el);
+  barTimer();
+};
+
+// ───────────────────────── il volto ─────────────────────────
+// lid: palpebra superiore chiusa (0-1) · tilt: inclinazione sopracciglia (+ arrabbiato, − triste) · lower: palpebra inferiore
+// size: grandezza degli occhi · smile: curva della bocca (−1 triste … 1 felice) · open: bocca aperta
+const FACES = {
+  neutral:   { lid: 0.00, tilt: 0.00, lower: 0.00, size: 1.00, smile: 0.20, open: 0.0, gx: 0,    gy: 0 },
+  happy:     { lid: 0.00, tilt: 0.00, lower: 0.38, size: 1.00, smile: 0.95, open: 0.0, gx: 0,    gy: 0 },
+  sad:       { lid: 0.22, tilt: -0.65, lower: 0.00, size: 0.95, smile: -0.7, open: 0.0, gx: 0,    gy: 0.25 },
+  angry:     { lid: 0.30, tilt: 0.75, lower: 0.10, size: 1.00, smile: -0.4, open: 0.0, gx: 0,    gy: 0 },
+  surprised: { lid: 0.00, tilt: 0.00, lower: 0.00, size: 1.18, smile: 0.0, open: 0.55, gx: 0,   gy: -0.1 },
+  sleepy:    { lid: 0.62, tilt: 0.00, lower: 0.05, size: 1.00, smile: 0.0, open: 0.0, gx: 0,    gy: 0.2 },
+  thinking:  { lid: 0.12, tilt: 0.15, lower: 0.00, size: 0.98, smile: 0.0, open: 0.0, gx: -0.5, gy: -0.45 },
+  curious:   { lid: 0.00, tilt: -0.15, lower: 0.00, size: 1.06, smile: 0.25, open: 0.0, gx: 0.45, gy: -0.1 },
+  skeptical: { lid: 0.34, tilt: 0.30, lower: 0.00, size: 1.00, smile: -0.1, open: 0.0, gx: 0.2,  gy: 0 },
+  excited:   { lid: 0.00, tilt: 0.00, lower: 0.22, size: 1.10, smile: 1.0, open: 0.45, gx: 0,   gy: 0 },
+  love:      { lid: 0.00, tilt: 0.00, lower: 0.25, size: 1.05, smile: 0.9, open: 0.0, gx: 0,    gy: 0, heart: true },
+  confused:  { lid: 0.10, tilt: -0.35, lower: 0.00, size: 1.00, smile: -0.2, open: 0.0, gx: -0.3, gy: 0.1 },
+};
+const cur = { lid: 0, tilt: 0, lower: 0, size: 1, smile: 0.2, open: 0, gx: 0, gy: 0 };
+let blink = 0, nextBlink = performance.now() + 2500, blinkPhase = -1, t0 = performance.now();
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(innerWidth * dpr); canvas.height = Math.round(innerHeight * dpr);
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+addEventListener("resize", resize); resize();
+
+function lerp(a, b, k) { return a + (b - a) * k; }
+function heart(x, y, s, color) {
+  g.fillStyle = color; g.beginPath();
+  g.moveTo(x, y + s * 0.35);
+  g.bezierCurveTo(x - s, y - s * 0.4, x - s * 0.45, y - s * 1.05, x, y - s * 0.45);
+  g.bezierCurveTo(x + s * 0.45, y - s * 1.05, x + s, y - s * 0.4, x, y + s * 0.35);
+  g.fill();
+}
+
+function draw(now) {
+  const W = innerWidth, H = innerHeight;
+  g.fillStyle = "#000"; g.fillRect(0, 0, W, H);
+
+  let key = asleep ? "sleepy" : (FACES[emotion] ? emotion : "neutral");
+  const f = FACES[key];
+  const k = 0.14;
+  for (const p of ["lid", "tilt", "lower", "size", "smile", "open"]) cur[p] = lerp(cur[p], f[p], k);
+  const targetLid = asleep ? 0.97 : f.lid;
+  cur.lid = lerp(cur.lid, targetLid, k);
+  cur.gx = lerp(cur.gx, clamp(f.gx + gazeX, -1, 1), 0.18);
+  cur.gy = lerp(cur.gy, clamp(f.gy + gazeY, -1, 1), 0.18);
+
+  // sbattere le palpebre
+  if (blinkPhase < 0 && now > nextBlink && !asleep) { blinkPhase = 0; }
+  if (blinkPhase >= 0) { blinkPhase += 0.12; blink = Math.sin(Math.min(blinkPhase, 1) * Math.PI); if (blinkPhase >= 1) { blinkPhase = -1; blink = 0; nextBlink = now + 2200 + Math.random() * 4200; } }
+
+  // bocca che si muove con la voce
+  let level = 0;
+  if (speaking && analyser) {
+    const a = new Uint8Array(analyser.fftSize); analyser.getByteTimeDomainData(a);
+    let s = 0; for (let i = 0; i < a.length; i++) { const v = (a[i] - 128) / 128; s += v * v; }
+    level = Math.min(1, Math.sqrt(s / a.length) * 5);
+  } else if (mouthLevel > 0) level = mouthLevel;
+  const mouthOpen = Math.max(cur.open, level * 0.8);
+
+  const unit = Math.min(W, H * 1.15);
+  const ew = unit * 0.20 * cur.size, eh = unit * 0.24 * cur.size;
+  const cy = H * 0.42 + Math.sin((now - t0) / 1800) * 3;
+  const gap = unit * 0.34;
+  const eyes = [[W / 2 - gap, -1], [W / 2 + gap, 1]];
+
+  for (const [cx, side] of eyes) {
+    const lidTotal = Math.min(1, cur.lid + blink * (1 - cur.lid));
+    g.save();
+    g.beginPath();
+    g.ellipse(cx, cy, ew, eh, 0, 0, Math.PI * 2);
+    g.clip();
+    g.fillStyle = "#e0f7fa"; g.fillRect(cx - ew, cy - eh, ew * 2, eh * 2);
+    // pupilla
+    const px = cx + cur.gx * ew * 0.45, py = cy + cur.gy * eh * 0.42;
+    if (f.heart) heart(px, py + eh * 0.05, ew * 0.7, "#e91e63");
+    else { g.fillStyle = "#06222a"; g.beginPath(); g.ellipse(px, py, ew * 0.46, eh * 0.46, 0, 0, Math.PI * 2); g.fill();
+           g.fillStyle = "#e0f7fa"; g.beginPath(); g.arc(px - ew * 0.14, py - eh * 0.16, ew * 0.1, 0, Math.PI * 2); g.fill(); }
+    // palpebra superiore, con inclinazione (inner = verso il centro del volto)
+    const top = cy - eh + lidTotal * eh * 2;
+    const tilt = cur.tilt * eh * 0.9;          // + = lato interno più basso
+    const inner = -side;                         // dall'occhio verso il centro
+    g.fillStyle = "#000";
+    g.beginPath();
+    g.moveTo(cx - ew * 1.2, cy - eh * 1.3);
+    g.lineTo(cx + ew * 1.2, cy - eh * 1.3);
+    g.lineTo(cx + ew * 1.2, top + tilt * (inner > 0 ? 1 : -1));
+    g.lineTo(cx - ew * 1.2, top + tilt * (inner > 0 ? -1 : 1));
+    g.closePath(); g.fill();
+    // palpebra inferiore (guance quando è felice)
+    if (cur.lower > 0.01) {
+      const bot = cy + eh - cur.lower * eh * 1.1;
+      g.beginPath(); g.moveTo(cx - ew * 1.2, bot + eh * 0.25); g.quadraticCurveTo(cx, bot - eh * 0.35, cx + ew * 1.2, bot + eh * 0.25);
+      g.lineTo(cx + ew * 1.2, cy + eh * 1.3); g.lineTo(cx - ew * 1.2, cy + eh * 1.3); g.closePath(); g.fill();
+    }
+    g.restore();
+  }
+
+  // bocca
+  const my = H * 0.42 + eh + unit * 0.16, mw = unit * 0.16 + mouthOpen * unit * 0.04;
+  g.strokeStyle = "#e0f7fa"; g.lineWidth = Math.max(4, unit * 0.014); g.lineCap = "round"; g.lineJoin = "round";
+  const curve = cur.smile * unit * 0.05;
+  if (mouthOpen > 0.08) {
+    g.fillStyle = "#06222a";
+    g.beginPath();
+    g.moveTo(W / 2 - mw, my);
+    g.quadraticCurveTo(W / 2, my + curve + mouthOpen * unit * 0.12, W / 2 + mw, my);
+    g.quadraticCurveTo(W / 2, my - curve * 0.3 - mouthOpen * unit * 0.10 * 0.2, W / 2 - mw, my);
+    g.fill(); g.stroke();
+  } else {
+    g.beginPath(); g.moveTo(W / 2 - mw, my); g.quadraticCurveTo(W / 2, my + curve * 1.6, W / 2 + mw, my); g.stroke();
+  }
+
+  // addormentata: Zzz e ora
+  if (asleep) {
+    g.fillStyle = "#37474f"; g.font = Math.round(unit * 0.07) + "px system-ui";
+    g.textAlign = "center";
+    const d = new Date(); g.fillText(d.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" }), W / 2, H * 0.82);
+    g.fillStyle = "#546e7a"; g.fillText("z z z", W / 2 + unit * 0.3, H * 0.2 + Math.sin(now / 700) * 6);
+  }
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

@@ -253,6 +253,22 @@ def tailnet_client(addr: str) -> bool:
     return ip.is_loopback or _in_nets(ip)
 
 
+# The web head (brain/head.py): a page that turns a phone or laptop into the robot's face, ears and voice.
+# HEAD_PORT=0 switches it off. A phone needs https: put a certificate in HEAD_TLS_CERT / HEAD_TLS_KEY
+# (a path, absolute or relative to server/), e.g. from `tailscale cert <name>.ts.net`.
+HEAD_PORT = int(os.environ.get("HEAD_PORT") or 8768)
+
+
+def _server_path(value: str) -> str:
+    if not value:
+        return ""
+    p = Path(value).expanduser()
+    return str(p if p.is_absolute() else Path(__file__).resolve().parent.parent / p)
+
+
+HEAD_TLS_CERT = _server_path(os.environ.get("HEAD_TLS_CERT") or "")
+HEAD_TLS_KEY = _server_path(os.environ.get("HEAD_TLS_KEY") or "")
+
 LIVE_VIEW_BIND = "127.0.0.1"  # this computer only. "0.0.0.0" would show the page and camera to the whole LAN
                               # (the controls still answer this computer only).
 SEND_CAMERA_TO_BRAIN = True  # let Rocky see the camera at all (False = no picture ever goes to the model)

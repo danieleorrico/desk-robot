@@ -1,0 +1,17 @@
+# Stack per Portainer (Stacks → Add stack → Web editor → incolla questo → Deploy).
+# Prima, sull'M700.2:  sudo git clone -b it https://github.com/danieleorrico/desk-robot.git /opt/desk-robot
+# e copia il .env in /opt/desk-robot/server/.env (le chiavi non stanno su GitHub).
+services:
+  francesca:
+    build:
+      context: /opt/desk-robot/docker
+    container_name: francesca
+    restart: unless-stopped
+    network_mode: host            # porte: 8765 (robot/testa), 8766 (dashboard), 8767 (vista live)
+    environment:
+      ROCKY_START_BRAIN: "1"      # avvia il cervello insieme al dashboard
+    volumes:
+      - /opt/desk-robot/server:/app/server
+      - francesca-cache:/root/.cache
+volumes:
+  francesca-cache:

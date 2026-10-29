@@ -45,7 +45,7 @@ import time
 
 import websockets
 
-from . import computer, config, faces, mouth, personality, settings
+from . import computer, config, faces, head, mouth, personality, settings
 from .body import Body
 from .dance import Dancer, length as dance_length
 from .thinking import Interrupted, RobotBrain
@@ -1506,6 +1506,7 @@ async def main() -> None:
     # Accepting only that (or none) keeps web pages from connecting and posing as the robot.
     async with websockets.serve(handle_robot, "0.0.0.0", config.PORT, max_size=1024 * 1024,  # snapshots ~40-300 KB
                                 origins=["file://", None]):
+        head_server = await head.serve()   # the web page that can stand in for the robot (brain/head.py)
         voice_task = asyncio.create_task(voice_loop())
         doze_task = asyncio.create_task(doze_loop())
         head_task = asyncio.create_task(head_loop())
@@ -1515,6 +1516,8 @@ async def main() -> None:
         try:
             await console_loop()
         finally:
+            if head_server is not None:
+                head_server.close()
             voice_task.cancel()
             doze_task.cancel()
             head_task.cancel()

@@ -105,6 +105,8 @@ TTS_CLARITY_DB = -1.5
 TTS_AUTO_PRESENCE_MAX = 6.0
 
 # Text-to-speech. The voice comes from Fish Audio (TTS_VOICE_ID above).
+# Linux built-in voice (espeak-ng): language + variant, e.g. "it+f3" (Italian, female). f1-f5 female, m1-m7 male.
+TTS_ESPEAK_VOICE = os.environ.get("TTS_ESPEAK_VOICE") or ("it+f3" if (os.environ.get("STT_LANGUAGE") or "en") == "it" else "en")
 TTS_FALLBACK_VOICE = os.environ.get("TTS_FALLBACK_VOICE") or "Fred"  # built-in voice used until Fish Audio is set up: a macOS `say`
                              # voice name (`say -v ?` lists them); Windows and Linux use their default
 # Loudness. Fish's level wanders from line to line, so the audio goes through

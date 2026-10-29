@@ -1,0 +1,7 @@
+# Solo quello che serve al cervello su un server senza microfono: ascolto e risposte sono nel cloud (Groq).
+openai
+websockets
+certifi
+numpy
+onnxruntime
+opencv-contrib-python-headless

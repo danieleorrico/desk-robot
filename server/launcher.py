@@ -37,7 +37,7 @@ LAUNCH_ENV = dict(os.environ)
 from brain import characters, config, faces, settings  # noqa: E402  (all standard-library only)
 
 PORT = int(os.environ.get("ROCKY_DASHBOARD_PORT", "8766"))
-BIND = "127.0.0.1"
+BIND = "0.0.0.0" if config.REMOTE_ACCESS else "127.0.0.1"   # ROCKY_REMOTE_ACCESS=tailscale opens it to your tailnet
 BRAIN_PORT = config.LIVE_VIEW_PORT
 PAGE = HERE / "brain" / "dashboard.html"
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
@@ -255,7 +255,11 @@ class Handler(BaseHTTPRequestHandler):
     # ── guards (same rules as the brain's own server) ──
     def _local(self) -> bool:
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]").lower()
-        if host not in LOCAL_HOSTS:
+        if config.REMOTE_ACCESS:
+            if not config.tailnet_client(self.client_address[0]) or not (host in LOCAL_HOSTS or config.tailnet_host(host)):
+                self._json(403, {"error": "forbidden"})
+                return False
+        elif host not in LOCAL_HOSTS:
             self._json(403, {"error": "forbidden"})
             return False
         # Another site's page can still make the browser fetch our URLs (an <img> pointed at /launcher/mics
@@ -270,7 +274,8 @@ class Handler(BaseHTTPRequestHandler):
     def _console(self) -> bool:
         origin = (self.headers.get("Origin") or "").lower()
         origin_host = origin.split("://", 1)[-1].rsplit(":", 1)[0].strip("[]")
-        if self.headers.get("X-Rocky-Console") != "1" or (origin and origin_host not in LOCAL_HOSTS):
+        origin_ok = origin_host in LOCAL_HOSTS or (config.REMOTE_ACCESS and config.tailnet_host(origin_host))
+        if self.headers.get("X-Rocky-Console") != "1" or (origin and not origin_ok):
             self._json(403, {"error": "not the console"})
             return False
         return True
@@ -478,7 +483,8 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
     srv.daemon_threads = True
-    print(f"{config.ROBOT_NAME} dashboard: http://localhost:{PORT}/  (this computer only)")
+    print(f"{config.ROBOT_NAME} dashboard: http://localhost:{PORT}/  ("
+          + ("this computer and your Tailscale devices" if config.REMOTE_ACCESS else "this computer only") + ")")
     if os.environ.get("ROCKY_START_BRAIN") == "1":
         brain.start()
     try:

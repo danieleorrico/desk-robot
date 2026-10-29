@@ -213,6 +213,46 @@ CAMERA_FPS = 10
 CAMERA_STREAM_SIZE = "vga"   # "vga" 640x480 (sharper face tracking, ~170 KB/s of WiFi) or "qvga" 320x240
 LIVE_VIEW_PORT = 8767   # the brain's own page + API. The launcher (server/launcher.py) serves the dashboard on 8766
                         # and passes these through; without the launcher, open this port directly
+
+# Opening the launcher's dashboard (port 8766) to your other devices. OFF by default: it can change settings and
+# start/stop the brain. ROCKY_REMOTE_ACCESS=tailscale in server/.env answers only devices on your Tailscale network
+# (100.64.0.0/10) and this computer; ROCKY_REMOTE_ACCESS=lan also answers your home network (192.168.x.x, 10.x.x.x,
+# 172.16-31.x.x). The internet is never answered.
+_REMOTE_MODE = (os.environ.get("ROCKY_REMOTE_ACCESS") or "").strip().lower()
+REMOTE_ACCESS = _REMOTE_MODE in ("tailscale", "lan")   # "lan" = tailnet + your home network (192.168.x, 10.x, 172.16-31.x)
+_NETS = ["100.64.0.0/10"] + (["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] if _REMOTE_MODE == "lan" else [])
+
+
+def _in_nets(ip) -> bool:
+    import ipaddress
+    return any(ip in ipaddress.ip_network(n) for n in _NETS)
+
+
+def tailnet_host(host: str) -> bool:
+    """A Host header that names this machine on an allowed network (its IP, a *.ts.net name, or *.local on "lan")."""
+    import ipaddress
+    host = host.strip("[]").lower()
+    if host.endswith(".ts.net") or (_REMOTE_MODE == "lan" and host.endswith(".local")):
+        return True
+    try:
+        return _in_nets(ipaddress.ip_address(host))
+    except ValueError:
+        return False
+
+
+def tailnet_client(addr: str) -> bool:
+    """The connecting device is this computer or on an allowed network."""
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(addr.split("%")[0])
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    return ip.is_loopback or _in_nets(ip)
+
+
 LIVE_VIEW_BIND = "127.0.0.1"  # this computer only. "0.0.0.0" would show the page and camera to the whole LAN
                               # (the controls still answer this computer only).
 SEND_CAMERA_TO_BRAIN = True  # let Rocky see the camera at all (False = no picture ever goes to the model)

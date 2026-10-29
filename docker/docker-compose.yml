@@ -1,0 +1,15 @@
+# Uso (sul server):  cd desk-robot/docker && docker compose up -d --build
+# Log:               docker compose logs -f        Aggiornare codice:  git pull && docker compose restart
+services:
+  francesca:
+    build: .
+    container_name: francesca
+    restart: unless-stopped
+    network_mode: host            # porte: 8765 (robot/testa), 8766 (dashboard), 8767 (vista live)
+    environment:
+      ROCKY_START_BRAIN: "1"      # avvia il cervello insieme al dashboard
+    volumes:
+      - ../server:/app/server     # codice, .env e settings.json restano nella cartella del repo
+      - francesca-cache:/root/.cache   # modelli scaricati (VAD, Smart Turn)
+volumes:
+  francesca-cache:

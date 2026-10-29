@@ -161,6 +161,11 @@ class RobotBrain:
             self._extra = {"reasoning": {"enabled": False}}
         elif "api.anthropic.com" in config.LLM_BASE_URL:
             self._extra = {"thinking": {"type": "disabled"}}
+        elif "api.groq.com" in config.LLM_BASE_URL and "gpt-oss" in config.MODEL:
+            self._extra = {"reasoning_effort": "low"}   # gpt-oss reasons first; keep it short
+        elif "generativelanguage.googleapis.com" in config.LLM_BASE_URL:
+            # Gemini 3 always thinks; "low" keeps it quick and leaves room for the spoken answer.
+            self._extra = {"reasoning_effort": "low"}
         else:
             self._extra = {}
         self.history: list[dict] = []
@@ -219,11 +224,14 @@ class RobotBrain:
             gen.close()
             self._forget(mark, user_msg)
             raise
-        except openai.APIConnectionError:
+        except openai.APIConnectionError as e:
+            print(f"  [llm] connection error: {e}")
             error = ("Brain cannot reach internet. Bad bad bad.", "sad")
-        except openai.AuthenticationError:
+        except openai.AuthenticationError as e:
+            print(f"  [llm] auth error: {e}")
             error = ("Brain has no key. Set LLM_API_KEY, human.", "sad")
         except openai.APIStatusError as e:
+            print(f"  [llm] API error {e.status_code}: {str(e)[:300]}")
             error = (f"Ow. Brain hurts. API error {e.status_code}.", "sad")
         finally:
             gen.close()
@@ -267,7 +275,7 @@ class RobotBrain:
                 raise Interrupted()
             stream = self.client.chat.completions.create(
                 model=config.MODEL,
-                max_tokens=200,  # backstop; the sentence limit does the real work
+                max_tokens=1500 if ("googleapis" in config.LLM_BASE_URL or "gpt-oss" in config.MODEL) else 200,  # backstop; Gemini's hidden thinking counts against it
                 messages=[{"role": "system", "content": personality.SYSTEM_PROMPT}, *self.history],
                 tools=[*TOOLS, *self.extra_tools()] if self.actions else openai.NOT_GIVEN,
                 stream=True,
@@ -391,6 +399,7 @@ class RobotBrain:
             if tail and spoken < limit:
                 yield tail
             elif not spoken and not tail:
+                print("  [llm] the model sent back an empty reply")
                 self.emotion = "thinking"
                 if on_emotion is not None:
                     on_emotion(self.emotion)

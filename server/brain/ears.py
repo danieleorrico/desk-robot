@@ -212,24 +212,83 @@ class Transcriber:
     base.en) into ~/.cache; after that it's offline."""
 
     def __init__(self, model_name: str = config.STT_MODEL) -> None:
+        self.model_name = model_name
+        self.model = None
+        self.use_groq = config.STT_BACKEND == "groq" and bool(config.GROQ_API_KEY)
+        if config.STT_BACKEND == "groq" and not config.GROQ_API_KEY:
+            print("stt: STT_BACKEND=groq but GROQ_API_KEY is empty, using the local model")
+        if self.use_groq:
+            print(f"stt: Groq cloud ({config.GROQ_STT_MODEL}), local model as backup")
+        else:
+            self._load_local()
+
+    def _load_local(self) -> None:
+        if self.model is not None:
+            return
         from faster_whisper import WhisperModel  # slow import, keep it lazy
 
         self.model = WhisperModel(
-            model_name, device="cpu", compute_type="int8", cpu_threads=config.STT_THREADS,
-            revision=config.STT_REVISION if model_name == config.STT_MODEL else None,
+            self.model_name, device="cpu", compute_type="int8", cpu_threads=config.STT_THREADS,
+            revision=config.STT_REVISION if self.model_name == config.STT_MODEL else None,
         )
 
+    # Phrases Whisper makes up from silence or noise (subtitle credits, etc.).
+    _GHOSTS = ("sottotitoli", "amara.org", "grazie per la visione", "grazie a tutti", "qtss")
+
+    def _is_ghost(self, text: str) -> bool:
+        low = text.lower()
+        return any(g in low for g in self._GHOSTS) and len(low) < 80
+
+    def _groq(self, audio: np.ndarray) -> str:
+        import io
+        import json
+        import urllib.request
+        import uuid
+        import wave
+
+        pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(pcm)
+        boundary = uuid.uuid4().hex
+        fields = {"model": config.GROQ_STT_MODEL, "language": config.STT_LANGUAGE,
+                  "temperature": "0", "response_format": "json", "prompt": config.STT_PROMPT[:600]}
+        body = b""
+        for k, v in fields.items():
+            body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").encode()
+        body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n"
+                 f"Content-Type: audio/wav\r\n\r\n").encode() + buf.getvalue() + f"\r\n--{boundary}--\r\n".encode()
+        req = urllib.request.Request(
+            "https://api.groq.com/openai/v1/audio/transcriptions", data=body,
+            headers={"Authorization": f"Bearer {config.GROQ_API_KEY}",
+                     "Content-Type": f"multipart/form-data; boundary={boundary}",
+                     "User-Agent": "desk-robot-brain/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read().decode()).get("text", "").strip()
+
     def transcribe(self, audio: np.ndarray) -> str:
-        segments, _ = self.model.transcribe(
-            audio,
-            language=config.STT_LANGUAGE,
-            beam_size=config.STT_BEAM,
-            vad_filter=True,
-            # Tells the model the name to expect; without this "Rocky" comes
-            # out as "right" / "righty" about half the time.
-            initial_prompt=config.STT_PROMPT,
-        )
-        return " ".join(s.text.strip() for s in segments).strip()
+        text = None
+        if self.use_groq:
+            try:
+                text = self._groq(audio)
+            except Exception as e:  # network, quota, bad key: keep working with the local model
+                print(f"stt: Groq failed ({type(e).__name__}: {e}); using the local model")
+        if text is None:
+            self._load_local()
+            segments, _ = self.model.transcribe(
+                audio,
+                language=config.STT_LANGUAGE,
+                beam_size=config.STT_BEAM,
+                vad_filter=True,
+                # Tells the model the name to expect; without this "Rocky" comes
+                # out as "right" / "righty" about half the time.
+                initial_prompt=config.STT_PROMPT,
+            )
+            text = " ".join(s.text.strip() for s in segments).strip()
+        return "" if self._is_ghost(text) else text
 
 
 _WAKE_CLEAN = re.compile(r"[^a-z' ]+")

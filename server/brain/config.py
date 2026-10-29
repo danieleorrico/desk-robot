@@ -149,6 +149,9 @@ STT_MODEL = os.environ.get("STT_MODEL") or "base.en"    # faster-whisper model: 
 # Pinned so a changed upload can't be loaded unnoticed; set to None to take the latest.
 STT_REVISION = "3d3d5dee26484f91867d81cb899cfcf72b96be6c" if STT_MODEL == "base.en" else None
 STT_BEAM = int(os.environ.get("STT_BEAM") or 1)   # 1 = fastest; 5 = more accurate (a bit slower)
+STT_BACKEND = (os.environ.get("STT_BACKEND") or "local").lower()   # "local" = faster-whisper here, "groq" = Whisper in the cloud (falls back to local)
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY") or ""
+GROQ_STT_MODEL = os.environ.get("GROQ_STT_MODEL") or "whisper-large-v3-turbo"
 STT_THREADS = 8          # CPU threads for transcription (0 = library default of 4)
 STT_LANGUAGE = os.environ.get("STT_LANGUAGE") or "en"   # "it" for Italian (also set STT_MODEL=small: base.en is English only)
 STT_PROMPT = (f"Ehi {ROBOT_NAME}. {ROBOT_NAME} è un robot da scrivania. Parla con {HUMAN_NAME} del fratellino Ottone." if STT_LANGUAGE == "it"
